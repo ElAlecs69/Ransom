@@ -1,4 +1,4 @@
-module github.com/mauri870/ransomware
+module github.com/ElAlecs69/ransomware
 
 require (
 	github.com/boltdb/bolt v1.3.1

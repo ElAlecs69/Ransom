@@ -1,6 +1,6 @@
 # Ransomware
 
-[![Build Status](https://travis-ci.org/mauri870/ransomware.svg?branch=master)](https://travis-ci.org/mauri870/ransomware)
+[![Build Status](https://travis-ci.org/ElAlecs69/Ransom.svg?branch=main)](https://travis-ci.org/ElAlecs69/Ransom)
 
 > Note 1: This project is purely academic, use at your own risk. I do not encourage in any way the use of this software illegally or to attack targets without their previous authorization.
 
@@ -45,7 +45,7 @@ The malware encrypt with a RSA-4096 (RSA-OAEP-4096 + SHA256) public key any payl
 First of all download the project outside your $GOPATH:
 
 ```bash
-git clone github.com/mauri870/ransomware
+git clone github.com/ElAlecs69/Ransom
 cd ransomware
 ```
 
@@ -138,7 +138,7 @@ curl http://2af7161c.ngrok.io
 
 If you see a `OK` and some logs in the server output you are ready to go.
 
-Now move the `ransomware.exe` and `unlocker.exe` to the VM along with some dummy files to test the malware. You can take a look at [cmd/common.go](https://github.com/mauri870/ransomware/blob/master/cmd/common.go) to see some configuration options like file extensions to match, directories to scan, skipped folders, max size to match a file among others.
+Now move the `ransomware.exe` and `unlocker.exe` to the VM along with some dummy files to test the malware. You can take a look at [cmd/common.go](https://github.com/ElAlecs69/Ransom/blob/main/cmd/common.go) to see some configuration options like file extensions to match, directories to scan, skipped folders, max size to match a file among others.
 
 Then simply run the `ransomware.exe` and see the magic happens :smile:.
 
