@@ -39,7 +39,15 @@ var (
 	// Interesting extensions to match files
 	InterestingExtensions = []string{
 		// Text Files
-		"doc", "docx", "msg", "odt", "wpd", "wps", "txt",
+		"doc", "docx", "msg", "odt", "wpd", "wps", "txt", "rtf", "md", "msi", "mod", "manifest",
+		// Presentation Files
+		"key", "odp", "pps", "ppt", "pptx",
+		// Spreadsheet Files
+		"csv", "ods", "xls", "xlsx",
+		// Database Files
+		"accdb", "dbf", "mdb", "pdb", "sql",
+		// Web Files
+		"asp", "aspx", "cer", "cfm", "cgi", "pl", "css", "htm", "html", "js", "zip", "rar", "tar", "gz", "7z",
 		// Data files
 		"csv", "pps", "ppt", "pptx",
 		// Audio Files
